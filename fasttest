@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+#              bash 4.3.11(1)     Linux Ubuntu 14.04.1        Fecha : 2017-03-07
+#
+# _______________|  fasttest : velocidad de descarga en Mbps, bandera para registrar resultados.
+#                               Utiliza los recursos fast.com de Netflix,
+#                               Comprobación a través de IPv4 e IPv6.
+#                               Este script independiente es un contenedor.
+#
+#           Uso:  fasttest [--log|--verbose]
+#
+#                Los resultados tardan aproximadamente un minuto en aparecer.
+#                Para el archivo de registro, se debe modificar la variable de directorio $logdir
+#
+#        Ejemplos:  $ fasttest   #  Sin argumentos para una sola línea con marca de tiempo.
+#                   2017-03-06, 19:25, None, 0.62, None
+#
+#                   $ fasttest --log  #  El gato registrará el archivo con el último resultado.
+#
+#                   $ fasttest --log tmp.log  #  else default: fasttest.log
+#
+#    Dependencias:  curl [ Se utiliza para descargar el siguiente script de Python: ]
+#                   fast_com.py ( https://github.com/sanderjo/fast.com )
+#                   python2 (Our script should work under bash regardless.)
+#                   grep, awk
+#
+#  CHANGE LOG  ORIGIN: https://github.com/rsvp/speedtest-linux 
+#  2017-03-07  Utilice el máximo de los resultados detallados, no el promedio
+#                (aunque todavía está disponible usando la marca --average).
+#                Cambiar el formato de registro para que coincida con el de speedtest,
+#                por lo tanto, "Ninguno" para las estadísticas de ping y carga.
+#  2017-03-06  La primera versión usa speedtest 2016-01-18 como plantilla.
+#              Este script SIEMPRE recupera el último código dependiente.
+#              Actualmente es ded23e4 el 4 de junio de 2016 de la fuente principal.
+
+
+#           _____ PREAMBLE_v3: configuración, variables y manejo de errores.
+#
+LC_ALL=POSIX
+# locale significa "ASCII, inglés estadounidense, sin reglas especiales,
+# salida según los estándares ISO y RFC".
+# Esp. utilice la codificación ASCII para los caracteres glob y de clasificación.
+shopt -s   extglob
+# ^establecer glob extendido para la coincidencia de patrones.
+shopt -s   failglob
+# ^Error de señales de coincidencia de patrón fallido.
+set -e
+# ^errores verificados: salida inmediata si un comando tiene un estado distinto de cero. 
+set -o pipefail
+# ^estado de salida en falla dentro de la tubería, no (predeterminado) último comando.
+set -u
+# ^las variables no asignadas serán errores.
+# Ejemplo de ASIGNACIÓN DE VARIABLE predeterminada: arg1=${1:-'foo'}
+
+arg1=${1:-'NULL'}
+arg2=${2:-'fasttest.log'}
+# ^nombre predeterminado para el archivo de registro, consulte $logf a continuación.
+
+program=${0##*/}   #  similar a usar el nombre base
+memf=$( mktemp /dev/shm/88_${program}_tmp.XXXXXXXXXX )
+mem2=$( mktemp /dev/shm/88_${program}_tmp.XXXXXXXXXX )
+errf=$( mktemp /dev/shm/88_${program}_tmp.XXXXXXXXXX )
+
+
+cleanup () {
+     #  Elimine los archivos temporales y, opcionalmente, salga del estado dado.
+     local status=${1:-'0'}
+     rm -f  $memf $mem2 $errf
+     [ $status = '-1' ] ||  exit $status      #  por lo tanto -1 impide la salida.
+} #--------------------------------------------------------------------
+warn () {
+     #  Mensaje con nombre base a stderr.     Uso: advertir "mensaje" 
+     echo -e "\n !!  ${program}: $1 "  >&2
+} #--------------------------------------------------------------------
+die () {
+     #  Salga con el estado del comando más reciente o el estado personalizado, después
+     #  limpiar y advertir. Uso: comando || morir "mensaje" [estado]
+     local status=${2:-"$?"}
+     cat $errf >&2
+     cleanup -1  &&   warn "$1"  &&  exit $status
+} #--------------------------------------------------------------------
+trap "die 'SIG disruption: but finish needs about one minute.' 114" 1 2 3 15
+#    Limpieza después de INTERRUPCIÓN: 1=SIGHUP, 2=SIGINT, 3=SIGQUIT, 15=SIGTERM
+trap "die 'unhandled ERR via trap, but cleanup finished.' 116" ERR
+#    Limpieza después de la falla del comando a menos que sea parte de una cláusula de prueba.
+#
+# _______________     ::  Empezar  Script ::::::::::::::::::::::::::::::::::::::::
+
+
+logdir="$HOME/var/log/net"
+#      ^RENAME directorio de registro para su uso personal; para la opción --log.
+
+[ -d "$logdir" ]  ||  mkdir -p "$logdir"  ||  die "fail creating $logdir" 117
+#  Verifique la existencia del directorio, de lo contrario, créelo.
+
+logf="$logdir/$arg2"
+#     SENCABEZADO de primera línea sugerido para CSV: Date, Time, DownMbps
+
+
+#  Confiar en una VERSIÓN LOCAL ESTÁTICA puede quedar obsoleto, por lo que
+#  DESCARGAR y ejecutar la ÚLTIMA VERSIÓN PRIMARIA de speedtest-cli.py:
+source='https://raw.githubusercontent.com/sanderjo/fast.com/master/fast_com.py'
+#  Si @sanderjo desaparece por algún motivo, intente duplicar @rsvp.
+#
+#  Recupere la fuente y colóquela en la memoria con permiso de ejecución:
+curl -kL --silent $source  >  $memf  \
+     ||  die "curl unable to retrieve $program source code."  113
+chmod 755 $memf
+#  ___ATTN___ Su encabezado es "#!/usr/bin/env python"
+#             pero el código solo es compatible con python2, así que use fast_verbose:
+
+
+fast_verbose () {
+     #  Obtenga la salida detallada para "sin registro", IPv4 e IPv6
+     python2 $memf 2> $errf
+     #  La base del código principal no es compatible con python3.
+}
+
+
+fast_average () {
+     #  Use awk para promediar los números de forma detallada (en Mbps):
+     fast_verbose | grep '^[0-9]' > $mem2
+     #  ... única forma razonable de analizar detalladamente: guarde solo los números.
+     awk -f - $mem2 <<EOHereDoc
+     { sumrate += \$1 }
+     END { if (NR !=0)
+            { print sumrate/NR }
+           else
+              print " ::  Hermes FALLO: nada que promediar." > "/dev/stderr" }
+EOHereDoc
+}
+
+#  2017-03-07  La marca --verbose mostrará todos los protocolos que se están probando.
+#               Algunos pueden indicar 0 Mbps dependiendo de la situación del usuario.
+#               En ese caso, el promedio se arrastrará innecesariamente
+#               más bajo, por lo que el MÁXIMO entre los protocolos será nuestro
+#               métrica predeterminada. (Sin embargo, la marca --average está disponible).
+
+
+fast_maximum () {               # Algunos pueden indicar 0 Mbps dependiendo de la situación del usuario.
+               # En ese caso, el promedio se arrastrará innecesariamente
+               # más bajo, por lo que el MÁXIMO entre los protocolos será nuestro
+               # métrica predeterminada. (Sin embargo, la marca --average está disponible).
+     #  Use awk para encontrar el máximo de detallado (en Mbps):
+     fast_verbose | grep '^[0-9]' > $mem2
+     #  ... única forma razonable de analizar detalladamente: guardar solo los números.
+     awk -f - $mem2 <<EOHereDoc
+     BEGIN { max = 0 }
+     { if (\$1 > max) { max = \$1 }}
+     END { if (NR !=0)
+            { print max }
+           else
+              print " ::  Hermes FALLO: nada que maximizar." > "/dev/stderr" }
+EOHereDoc
+}
+
+
+timestamped () {
+     #  Obtenga tiempo, luego póngalo en formato CSV:
+     epoch="$( date '+%Y-%m-%d, %H:%M' )" 
+     speeds="$( fast_maximum )"
+     #      ^un único número real: velocidad de descarga en Mbps
+     echo "$epoch, None, $speeds, None"
+     #             ^compatible con el formato más rápido: ping, descarga, carga.
+          # Resultado de muestra: "2017-03-06, 19:25, Ninguno, 0.62, Ninguno"
+}
+
+
+
+case "$arg1" in 
+       NULL)  timestamped                                                     ;;
+      --log)  timestamped >> "$logf"  &&  cat "$logf"                         ;;
+
+  --verbose)  fast_verbose                                                    ;;
+  --average)  fast_average                                                    ;;
+
+  --default)  echo "Default log directory: $logdir "
+              echo "Default log file:      $arg2 "                            ;;
+
+          *)  die "undefined arg: $arg1"  115                                 ;;
+esac
+
+
+
+cleanup    #  Instead of: trap arg EXIT
+# _______________ EOS ::  END of Script ::::::::::::::::::::::::::::::::::::::::
+
+#  vim: set fileencoding=utf-8 ff=unix tw=78 ai syn=sh :

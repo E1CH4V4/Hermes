@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+#              bash 4.3.11(1)     Linux Ubuntu 14.04.1        Fecha : 2017-03-06
+#
+# _______________|  speedtest : ping, velocidades de descarga y carga.
+#                               Línea de comandos usando recursos speedtest.net.
+#                               Este script independiente es un contenedor. 
+#
+#           Uso:  speedtest [--log|--simple|--verbose|--list|--fav|--version]
+#
+#                 Tarda aproximadamente un minuto en aparecer los resultados.
+#                 Para el archivo de registro, se debe modificar la $logdir de la variable de directorio.
+#
+#        Ejemplos:  $ speedtest --simple 
+#                   Ping: 22.602 ms
+#                   Download: 0.62 Mbit/s
+#                   Upload: 0.25 Mbit/s
+#                   
+#                   $ speedtest   #  Sin args para una sola línea con marca de tiempo.
+#                   2015-03-13, 19:25, 22.602, 0.62, 0.25
+#
+#                   $ speedtest --log  #  Will cat archivo de registro con el último resultado.
+#
+#                   $ speedtest --log tmp.log  #  De lo contrario por defecto: speedtest.log
+#
+#    Dependencies:  curl [ Se utiliza para descargar el siguiente script de Python: ]
+#                   speedtest.py ( https://github.com/sivel/speedtest-cli )
+#
+#  REGISTRO DE CAMBIOS  ORIGINAL: https://github.com/rsvp/speedtest-linux 
+# 2017-03-06 Upstream deja en desuso speedtest-cli.py a favor de speedtest.py
+# 2016-01-18 Solucione el problema # 2 usando $HOME en lugar de /home/${USER} para logdir.
+#                 @oeolartep: $USER era variable no consolidada en los trabajos cron.
+#  2015-03-19 Segundo archivo de registro de nombres de argumento. Existencia del directorio probada.
+#  2015-03-17 Aclarar algunos comentarios.
+#  2015-03-13 Este script SIEMPRE recupera el código dependiente más reciente.
+#  Actualmente es la versión 0.3.2 de la fuente primaria.
+
+
+#           _____ PREAMBLE_v3: configuración, variables y manejo de errores.
+#
+LC_ALL=POSIX
+#          locale significa "ASCII, inglés de EE. UU., sin reglas especiales, 
+#          salida según las normas ISO y RFC". 
+#          Esp. use la codificación ASCII para glob y caracteres de clasificación. 
+shopt -s   extglob
+#     ^establecer glob extendido para la coincidencia de patrones.
+shopt -s   failglob
+#         ^Error de señales de coincidencia de patrón fallido.
+set -e
+#   ^errores verificados: salida inmediata si un comando tiene un estado distinto de cero. 
+set -o pipefail
+#   ^ estado de salida en caso de falla dentro de la tubería, no (predeterminado) último comando.
+set -u
+#    ^las variables no asignadas serán errores.
+#    Ejemplo de ASIGNACIÓN DE VARIABLE predeterminada: arg1=${1:-'foo'}
+
+arg1=${1:-'NULL'}
+arg2=${2:-'speedtest.log'}
+#         ^nombre predeterminado para el archivo de registro, consulte $logf a continuación.
+
+program=${0##*/}   #  similar a usar el nombre base
+memf=$( mktemp /dev/shm/88_${program}_tmp.XXXXXXXXXX )
+errf=$( mktemp /dev/shm/88_${program}_tmp.XXXXXXXXXX )
+
+
+cleanup () {
+     #  Elimine los archivos temporales y, opcionalmente, salga del estado dado.
+     local status=${1:-'0'}
+     rm -f  $memf $errf
+     [ $status = '-1' ] ||  exit $status      #  por lo tanto, -1 impide la salida.
+} #--------------------------------------------------------------------
+warn () {
+     #  Mensaje con nombrede base a stderr.          Uso: warn "message"
+     echo -e "\n !!  ${program}: $1 "  >&2
+} #--------------------------------------------------------------------
+die () {
+     # Salir con el estado del comando más reciente o el estado personalizado, después de
+     # limpiar y advertir.      Uso: || de comandos die "message" [estado]
+     local status=${2:-"$?"}
+     cat $errf >&2
+     cleanup -1  &&   warn "$1"  &&  exit $status
+} #--------------------------------------------------------------------
+trap "die 'SIG disruption: but finish needs about one minute.' 114" 1 2 3 15
+#    Limpieza después de LA INTERRUPCIÓN: 1=SIGHUP, 2=SIGINT, 3=SIGQUIT, 15=SIGTERM
+trap "die 'unhandled ERR via trap, but cleanup finished.' 116" ERR
+#    Limpieza después de un error de comando a menos que forme parte de una cláusula de prueba.
+#
+# _______________     ::  Comienzo del  Script ::::::::::::::::::::::::::::::::::::::::
+
+
+favorite='1335'
+#        ^DreamHost en Los Ángeles para la opción --fav.
+#        Usa --list para encontrar tu favorita.
+
+logdir="$HOME/var/log/net"
+#      ^RENAME directorio de registro para su uso personal; for --log option.
+
+[ -d "$logdir" ]  ||  mkdir -p "$logdir"  ||  die "fail creating $logdir" 117
+#  Verifique la existencia del directorio, de lo contrario, créelo.
+
+logf="$logdir/$arg2"
+#     ENCABEZADO de primera línea sugerido para CSV: fecha, hora, ping, abajo, arriba
+
+
+# Confiar en una VERSIÓN LOCAL ESTÁTICA puede quedar obsoleto, por lo que
+# DESCARGAR y ejecutar LA ÚLTIMA VERSIÓN PRIMARIA de speedtest-cli.py:
+source='https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py'
+# Si @sivel desaparece por algún motivo, intente duplicar @rsvp.
+#
+# Recupere la fuente y colóquela en la memoria con permiso de ejecución:
+curl -kL --silent $source  >  $memf  \
+     ||  die "curl unable to retrieve $program source code."  113
+chmod 755 $memf
+
+
+timestamped () {
+     #  Obtenga tiempo, luego --simple en una línea, finalmente combine en formato CSV.
+     epoch="$( date '+%Y-%m-%d, %H:%M' )" 
+     speeds="$( echo $( $memf --simple | sed -e 's/^.*: //' -e 's/ .*s$/, /' ))"
+     # ^en una sola línea: ping, descarga, velocidades de carga -- dada la salida:
+     #                   Ping: 22.602 ms
+     #                   Download: 0.62 Mbit/s
+     #                   Upload: 0.25 Mbit/s
+     echo "$epoch, $speeds"  |  sed -e 's/,$//'
+     #  Sample result:  "2015-03-13, 19:25, 22.602, 0.62, 0.25"
+}
+
+
+case "$arg1" in 
+       NULL)  timestamped                                                     ;;
+      --log)  timestamped >> "$logf"  &&  cat "$logf"                         ;;
+
+   --simple)  $memf --simple                                                  ;;
+              # No especificar el servidor favorito permite que el programa 
+              # elija el servidor con la latencia más baja.
+      --fav)  $memf --simple --server $favorite                               ;;
+  --verbose)  $memf                                                           ;;
+  --version)  $memf --version  ||  true                                       ;;
+     --list)  $memf --list                                                    ;;
+              # lista de servidores en todo el mundo.
+
+  --default)  echo "Default log directory: $logdir "
+              echo "Default log file:      $arg2 "
+              echo "--fav test server:     $favorite"                         ;;
+
+          *)  die "undefined arg: $arg1"  115                                 ;;
+esac
+
+
+
+cleanup    #  En lugar de: trap arg EXIT
+# _______________ EOS ::  FIN del Script ::::::::::::::::::::::::::::::::::::::::
+
+#  vim: set fileencoding=utf-8 ff=unix tw=78 ai syn=sh :
